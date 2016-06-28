@@ -308,8 +308,7 @@ class BuildPreparer(object):
     def details_for_dependency_from_str(self, dependency):
         details = dict(
             name=dependency.split('/')[1],
-            #url='git@github.com:%s.git' % dependency,
-            url='file:///%s' % dependency,
+            url='git@github.com:%s.git' % dependency,
         )
 
         fragment_split = dependency.split('#')
