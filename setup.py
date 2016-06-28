@@ -15,7 +15,7 @@ setup(
     version=version,
     license="MIT",
     author="Reuven V. Gonzales",
-    url="https://github.com/ravenac95/packsible",
+    url="https://github.com/packsible/packsible",
     author_email="reuven@virtru.com",
     description="Combine the power of packer and ansible conveniently",
     packages=find_packages(exclude=['tests', 'tests.*']),
