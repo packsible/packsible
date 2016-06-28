@@ -26,6 +26,7 @@ setup(
         "click==6.6",
         "PyYAML==3.11",
         "flask==0.11",
+        "GitPython==2.0.5",
     ],
     entry_points={
         'console_scripts': [
