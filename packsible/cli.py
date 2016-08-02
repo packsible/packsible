@@ -105,6 +105,7 @@ class PacksibleConfig(object):
 
     def find_best_base_image(self, dependencies):
         dependencies_set = set(dependencies)
+
         for base_image_name, base_image in self._base_image_map.iteritems():
             provides_set = set(base_image.get('provides', []))
 
@@ -115,6 +116,12 @@ class PacksibleConfig(object):
             if base_image.get('is_default', False):
                 self._default_base_image = base_image
             self._base_image_map[base_image['image']] = base_image
+
+        self._raw_config.setdefault(
+            'private_key_path',
+            # By default this was used on a vagrant box
+            '/home/vagrant/.ssh/id_rsa'
+        )
 
     def get(self, *args, **kwargs):
         return self._raw_config.get(*args, **kwargs)
@@ -194,7 +201,7 @@ class BuildPreparer(object):
             provisioners=[
                 {
                     "type": "file",
-                    "source": "/home/vagrant/.ssh/id_rsa",
+                    "source": self._packsible_config.get('private_key_path'),
                     "destination": "/tmp/id_rsa",
                 },
                 {
