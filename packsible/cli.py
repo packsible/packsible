@@ -3,6 +3,7 @@
 # Copy each of the dependencies into a roles directory
 # Copy the current directory as if it's a role
 # Generate a playbook with the correct roles
+from __future__ import print_function
 import yaml
 import click
 import os
@@ -12,7 +13,11 @@ import errno
 import json
 import copy
 import git
+import time
+import sys
+from StringIO import StringIO
 from .utils import TemporaryDirectory
+from .images import find_best_docker_base_image
 from .server import run_server
 
 
@@ -21,6 +26,19 @@ BASE_ANSIBLE = [dict(
   become=True,
   connection='local'
 )]
+
+ROCKERFILE_HOSTS_STR = """
+[localhost]
+127.0.0.1
+"""
+
+ROCKERFILE_TEMPLATE = """
+FROM {base_image}
+
+LABEL packsible.provides="{packsible_provides}"
+
+MOUNT {private_key_dir}:/root/.ssh
+"""
 
 
 @click.group()
@@ -47,11 +65,16 @@ def cli(ctx, config_dir):
 @click.option('--remote/--no-remote', default=False)
 @click.option('--base-image')
 @click.option('--rebuild-image')
+@click.option('--debug-build/--no-debug-build', default=False)
+@click.option('--builder')
 @click.pass_context
-def build(ctx, remote, base_image, rebuild_image):
+def build(ctx, remote, base_image, rebuild_image, debug_build, builder):
     project_dir = os.path.abspath('.')
 
     config = ctx.obj
+
+    if builder:
+        config.set('builder', builder)
 
     # Make sure the directory is a git repo for now
     # FIXME in the future we want to allow any directory
@@ -66,14 +89,19 @@ def build(ctx, remote, base_image, rebuild_image):
     if rebuild_image:
         packsible_def['rebuild_image'] = rebuild_image
 
+    packsible_def['debug_build'] = debug_build
+
     preparer = BuildPreparer.from_packsible_def(config, project_dir, packsible_def)
 
     if remote:
         pass
     else:
+        temp_dir_base_dir = preparer.packsible_working_dir('tmp')
         # Move prepared file into a temporary directory
-        with TemporaryDirectory() as tmp_dir:
-            preparer.unpack_prepared_file_to(tmp_dir)
+        with TemporaryDirectory(dir=temp_dir_base_dir) as temp_dir:
+            preparer.unpack_prepared_file_to(temp_dir)
+
+        #tmp_dir = os.path.abspath('./.packsible/playbooks')
 
 
 @cli.command()
@@ -103,14 +131,6 @@ class PacksibleConfig(object):
     def get_base_image(self, base_image_name):
         return self._base_image_map.get(base_image_name, {})
 
-    def find_best_base_image(self, dependencies):
-        dependencies_set = set(dependencies)
-
-        for base_image_name, base_image in self._base_image_map.iteritems():
-            provides_set = set(base_image.get('provides', []))
-
-            provides_set
-
     def process_raw_config(self):
         for base_image in self._raw_config.get('base_images', []):
             if base_image.get('is_default', False):
@@ -123,26 +143,39 @@ class PacksibleConfig(object):
             '/home/vagrant/.ssh/id_rsa'
         )
 
+        self._raw_config.setdefault(
+            'builder',
+            'packer'
+        )
+
     def get(self, *args, **kwargs):
         return self._raw_config.get(*args, **kwargs)
+
+    def set(self, key, value):
+        self._raw_config[key] = value
 
 
 class BuildPreparer(object):
     @classmethod
     def from_packsible_def(cls, packsible_config, project_dir, packsible_def):
-        builder = cls(packsible_config, project_dir, packsible_def)
+        builder = cls(packsible_config, project_dir,
+                      os.path.basename(project_dir),
+                      packsible_def)
         builder.prepare()
         return builder
 
-    def __init__(self, packsible_config, project_dir, packsible_def):
+    def __init__(self, packsible_config, project_dir, project_name, packsible_def):
         self._packsible_config = packsible_config
         self._project_dir = project_dir
+        self._project_name = project_name
         self._packsible_def = packsible_def
 
     def prepare(self):
         # Ensure that .packsible file exists in project dir
         packsible_working_dir = self.packsible_working_dir()
         mkdir_p(packsible_working_dir)
+
+        mkdir_p(self.packsible_working_dir('tmp'))
 
         # Create a tarball using the shell
         response = subprocess.call(
@@ -157,34 +190,7 @@ class BuildPreparer(object):
     def packsible_working_dir(self, *joins):
         return os.path.join(self._project_dir, '.packsible', *joins)
 
-    def unpack_prepared_file_to(self, dest_dir):
-        source = self.packsible_working_dir('build.tar.gz')
-        dest = os.path.join(dest_dir, 'build.tar.gz')
-        shutil.copy(source, dest)
-
-        response = subprocess.call('tar xvf %s' % 'build.tar.gz', cwd=dest_dir,
-                                   shell=True)
-
-        if response != 0:
-            raise Exception('Could not unpack the prepared build')
-
-        mkdir_p(os.path.join(dest_dir, 'roles'))
-
-        base_image_name = self._packsible_def['base_image']
-
-        base_image = self._packsible_config.get_base_image(base_image_name)
-
-        initial_skip_list = base_image.get('provides', [])
-
-        # Download dependencies
-        role_paths = self.download_dependencies(
-            dest_dir,
-            self._packsible_def.get('dependencies', []),
-            skip_list=initial_skip_list
-        )
-        # Add self to the roles in case this has role definitions
-        role_paths.append(dest_dir)
-
+    def generate_image_with_packer(self, base_image, dest_dir, source, role_paths, dependencies):
         is_a_rebuild = False
         if self._packsible_def.get('rebuild_image'):
             is_a_rebuild = True
@@ -193,7 +199,7 @@ class BuildPreparer(object):
             builders=[
                 dict(
                     type="docker",
-                    image=self._packsible_def.get('rebuild_image', self._packsible_def['base_image']),
+                    image=base_image,
                     export_path="image.tar",
                     pull=False
                 )
@@ -254,15 +260,6 @@ class BuildPreparer(object):
 
         json.dump(template, open(os.path.join(dest_dir, 'template.json'), 'w'))
 
-        # generate playbook
-        ansible = copy.deepcopy(BASE_ANSIBLE)
-
-        ansible[0]['roles'] = map(os.path.basename, role_paths)
-
-        playbook_file = open(os.path.join(dest_dir, 'playbook.yml'), 'w')
-        playbook_file.write(yaml.dump(ansible, default_flow_style=False))
-        playbook_file.close()
-
         response = subprocess.call(
             ['packer', 'build', 'template.json'],
             cwd=dest_dir,
@@ -273,6 +270,119 @@ class BuildPreparer(object):
 
         shutil.move(os.path.join(dest_dir, 'image.tar'),
                     self.packsible_working_dir('image.tar'))
+
+
+    def generate_image_with_rocker(self, base_image, dest_dir, source, role_paths, dependencies):
+        packsible_provides_list = dependencies[:]
+        packsible_provides_list.append(self._project_name)
+        packsible_provides_list.insert(0, 'base')
+        packsible_provides_str = ",".join(packsible_provides_list)
+
+        # Record as a stream for debugging purposes
+        rockerfile_stream = StringIO()
+        rockerfile_stream.write(ROCKERFILE_TEMPLATE.format(
+            private_key_dir=self._packsible_config.get('private_key_dir'),
+            base_image=base_image,
+            packsible_provides=packsible_provides_str
+        ))
+
+        def rockerfile(line):
+            print(line, file=rockerfile_stream)
+
+        hosts_file = open(os.path.join(dest_dir, 'hosts'), 'w')
+        hosts_file.write(ROCKERFILE_HOSTS_STR)
+        hosts_file.close()
+
+        rockerfile("MOUNT %s:/packsible" % dest_dir)
+        rockerfile("MOUNT %s:/packsible/roles/%s" % (dest_dir, self._project_name))
+
+        if self._packsible_def.get('is_app', True):
+            rockerfile("ADD . /app")
+        rockerfile("WORKDIR /packsible")
+        rockerfile("RUN ansible-playbook -i hosts playbook.yml")
+        rockerfile("TAG %s:latest" % self._project_name)
+
+        if self._packsible_def.get('is_app', True) and self._packsible_def.get('command', None):
+            rockerfile("WORKDIR /app")
+            rockerfile("CMD %s" % self._packsible_def.get('command'))
+
+        rockerfile_str = rockerfile_stream.getvalue()
+
+        rockerfile_file = open(os.path.join(dest_dir, 'Rockerfile'), 'w')
+        rockerfile_file.write(rockerfile_str)
+        rockerfile_file.close()
+
+        if self._packsible_def['debug_build']:
+            print("To debug this build go to the staging directory located at:")
+            print(dest_dir)
+            print("")
+            print("This will last for 300 seconds")
+            time.sleep(300)
+
+        response = subprocess.call(
+            ['rocker', 'build'],
+            cwd=dest_dir
+        )
+
+        if response != 0:
+            raise Exception("Failed to build image")
+
+    def unpack_prepared_file_to(self, temp_dir):
+        if not self._packsible_def.get('is_imageable', True):
+            print('This packsible configuration is not meant to be imaged')
+            print('based on the is_imageable flag in the packsible.yml file')
+            print('')
+            print('Exiting')
+            sys.exit(1)
+        dest_dir = os.path.join(temp_dir, self._project_name)
+
+        mkdir_p(dest_dir)
+
+        source = self.packsible_working_dir('build.tar.gz')
+        dest = os.path.join(dest_dir, 'build.tar.gz')
+        shutil.copy(source, dest)
+
+        response = subprocess.call('tar xvf %s' % 'build.tar.gz', cwd=dest_dir,
+                                   shell=True)
+
+        if response != 0:
+            raise Exception('Could not unpack the prepared build')
+
+        mkdir_p(os.path.join(dest_dir, 'roles'))
+
+        # Download dependencies
+        dependencies, all_role_paths = self.download_dependencies(
+            dest_dir,
+            self._packsible_def.get('dependencies', []),
+            skip_list=[]
+        )
+
+        base_image = find_best_docker_base_image(
+            self._packsible_config,
+            dependencies
+        )
+
+        role_paths = []
+        for role_path in all_role_paths:
+            if not os.path.basename(role_path) in base_image['provides']:
+                role_paths.append(role_path)
+
+        # Add self to the roles in case this has role definitions
+        role_paths.append(dest_dir)
+
+        # generate playbook
+        ansible = copy.deepcopy(BASE_ANSIBLE)
+
+        ansible[0]['roles'] = map(os.path.basename, role_paths)
+
+        playbook_file = open(os.path.join(dest_dir, 'playbook.yml'), 'w')
+        playbook_file.write(yaml.dump(ansible, default_flow_style=False))
+        playbook_file.close()
+
+        if self._packsible_config.get('builder') == 'packer':
+            self.generate_image_with_packer(base_image['name'], dest_dir, source, role_paths, dependencies)
+        else:
+            self.generate_image_with_rocker(base_image['name'], dest_dir, source, role_paths, dependencies)
 
     def download_dependencies(self, dest_dir, dependencies, skip_list=None):
         role_paths = []
@@ -298,7 +408,7 @@ class BuildPreparer(object):
             # Read dependencies recursively
             packsible_path_for_dep = os.path.join(dest_path, 'packsible.yml')
             packsible_def_for_dep = yaml.load(open(packsible_path_for_dep)) or {}
-            dependent_role_paths = self.download_dependencies(
+            dependencies, dependent_role_paths = self.download_dependencies(
                 dest_dir,
                 packsible_def_for_dep.get('dependencies', []),
                 skip_list=skip_list
@@ -310,7 +420,7 @@ class BuildPreparer(object):
                 role_paths.append(dependent_role_path)
 
             role_paths.append(dest_path)
-        return role_paths
+        return (skip_list, role_paths)
 
     def details_for_dependency_from_str(self, dependency):
         details = dict(
