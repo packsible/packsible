@@ -27,6 +27,7 @@ setup(
         "PyYAML==3.11",
         "flask==0.11",
         "GitPython==2.0.5",
+        "docker-py==1.9.0",
     ],
     entry_points={
         'console_scripts': [
