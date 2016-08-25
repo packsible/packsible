@@ -1,4 +1,3 @@
-import sys
 from docker import Client
 
 
@@ -10,10 +9,11 @@ def find_best_docker_base_image(config, dependencies):
     # All images must have a base
     dependencies_set.add('base')
 
-    docker_base_url = config.get('docker_base_url',
-                                 'unix://var/run/docker.sock')
+    docker_base_url = config.get('docker_base_url')
 
     docker_client = Client()
+    if docker_base_url:
+        docker_client = Client(base_url=docker_base_url)
 
     images = filter(
         lambda img: (img.get('Labels', {}) or {}).get('packsible.provides') is not None,

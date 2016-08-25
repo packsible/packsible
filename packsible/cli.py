@@ -40,6 +40,14 @@ LABEL packsible.provides="{packsible_provides}"
 MOUNT {private_key_dir}:/root/.ssh
 """
 
+# Default list of things to exclude when making a tarball of the current
+# directory
+TARBALL_EXCLUDE_LIST = [
+    ".packsible/",
+    ".vs.env/",
+    "*.*.swp",
+    ".vagrant/"
+]
 
 @click.group()
 @click.option('--config-dir', type=click.Path(exists=False),
@@ -177,9 +185,15 @@ class BuildPreparer(object):
 
         mkdir_p(self.packsible_working_dir('tmp'))
 
+        tarball_exclude_str = ' '.join(
+            map(lambda x: "--exclude='%s'" % x, TARBALL_EXCLUDE_LIST)
+        )
+
+        tarball_command = 'git ls-files -c -o --exclude-standard | tar -czf %s/build.tar.gz %s -T -' % (packsible_working_dir, tarball_exclude_str)
+
         # Create a tarball using the shell
         response = subprocess.call(
-            'git ls-files -c -o --exclude-standard | tar -czf %s/build.tar.gz -T -' % packsible_working_dir,
+            tarball_command,
             shell=True,
             cwd=self._project_dir
         )
