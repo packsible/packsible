@@ -15,6 +15,7 @@ import copy
 import git
 import time
 import sys
+import packsible
 from StringIO import StringIO
 from .utils import TemporaryDirectory
 from .images import find_best_docker_base_image
@@ -50,6 +51,7 @@ TARBALL_EXCLUDE_LIST = [
 ]
 
 @click.group()
+@click.version_option(version=packsible.__version__)
 @click.option('--config-dir', type=click.Path(exists=False),
               default=click.get_app_dir('packsible', force_posix=True))
 @click.pass_context
