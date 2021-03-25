@@ -24,7 +24,7 @@ setup(
     platforms='*nix',
     install_requires=[
         "click==6.6",
-        "PyYAML==3.11",
+        "PyYAML==5.4",
         "flask==0.11",
         "GitPython==2.0.5",
         "docker-py==1.9.0",
